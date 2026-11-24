@@ -11,6 +11,16 @@ export type Course = {
   credits: number;
   mandatory: boolean;
   demo?: boolean;
+  instructor?: string;
+  note?: string;
+  color?: string;
+};
+
+export type RotatingShift = {
+  week: "A" | "B";
+  days: WeekDay[];
+  startTime: string;
+  endTime: string;
 };
 
 export type Availability = {
@@ -19,6 +29,8 @@ export type Availability = {
   startTime: string;
   endTime: string;
   commute: number;
+  workNotes?: Partial<Record<WeekDay, Record<string, string>>>;
+  rotatingShifts?: RotatingShift[];
 };
 
 export type Preferences = {
@@ -48,24 +60,27 @@ export function hasWorkConflict(
   course: Pick<Course, "startTime" | "endTime">,
   availability: Availability,
   preferences: Preferences,
+  day?: WeekDay,
 ): "trabajo" | "traslado-descanso" | null {
   const classStart = toMinutes(course.startTime);
   const classEnd = toMinutes(course.endTime);
-  const workStart = toMinutes(availability.startTime);
-  const workEnd = toMinutes(availability.endTime);
+  const shifts = availability.type === "rotativo" && availability.rotatingShifts?.length
+    ? availability.rotatingShifts.filter((shift) => !day || shift.days.includes(day))
+    : [{ startTime: availability.startTime, endTime: availability.endTime }];
 
-  if (classStart < workEnd && classEnd > workStart) return "trabajo";
+  for (const shift of shifts) {
+    const workStart = toMinutes(shift.startTime);
+    const workEnd = toMinutes(shift.endTime);
+    if (classStart < workEnd && classEnd > workStart) return "trabajo";
 
-  const rest = preferences.minimumRest * 60;
-  const commute = availability.commute;
-  if (classStart >= workEnd && classStart < workEnd + commute) {
-    return "traslado-descanso";
-  }
-  if (classStart >= workEnd + commute && classStart < workEnd + commute + rest) {
-    return "traslado-descanso";
-  }
-  if (classEnd <= workStart && classEnd + rest > workStart) {
-    return "traslado-descanso";
+    const rest = preferences.minimumRest * 60;
+    const commute = availability.commute;
+    if (classStart < workEnd + commute + rest && classStart >= workEnd) {
+      return "traslado-descanso";
+    }
+    if (classEnd <= workStart && classEnd + rest > workStart) {
+      return "traslado-descanso";
+    }
   }
   return null;
 }
@@ -100,7 +115,7 @@ export function evaluateSchedule(
   for (const course of courses) {
     for (const day of course.days) {
       if (availability.days.includes(day)) {
-        const reason = hasWorkConflict(course, availability, preferences);
+        const reason = hasWorkConflict(course, availability, preferences, day);
         if (reason) conflicts.push({ courseId: course.id, day, reason });
       }
       if (preferences.avoidNights && toMinutes(course.endTime) > 21 * 60) {
@@ -167,17 +182,19 @@ export function generateProposals(
   preferences: Preferences,
   limit = 3,
 ): ScheduleProposal[] {
-  const isConflictFree = (proposal: ScheduleProposal) =>
-    proposal.conflicts.length === 0 &&
-    proposal.overlaps.length === 0 &&
-    proposal.nightClasses.length === 0 &&
-    proposal.freeDayClasses.length === 0;
+  const savedCourses = courses.some((course) => !course.demo)
+    ? courses.filter((course) => !course.demo)
+    : courses;
+  const requiredCount = savedCourses.filter((course) => course.mandatory).length;
+  const courseCount = Math.max(requiredCount, Math.min(preferences.courseCount, savedCourses.length));
+  const evaluated = generateCourseCombinations(savedCourses, courseCount).map((selection) => ({
+    courses: selection,
+    ...evaluateSchedule(selection, availability, preferences),
+  }));
+  const withoutCourseOverlaps = evaluated.filter((proposal) => proposal.overlaps.length === 0);
+  const conflictFree = withoutCourseOverlaps.filter((proposal) => proposal.conflicts.length === 0);
 
-  return generateCourseCombinations(courses, preferences.courseCount)
-    .map((selection) => ({
-      courses: selection,
-      ...evaluateSchedule(selection, availability, preferences),
-    }))
-    .sort((a, b) => Number(isConflictFree(b)) - Number(isConflictFree(a)) || b.score - a.score)
+  return (conflictFree.length > 0 ? conflictFree : withoutCourseOverlaps)
+    .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }

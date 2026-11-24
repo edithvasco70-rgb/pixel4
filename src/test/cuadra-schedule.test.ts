@@ -54,10 +54,38 @@ describe("Cuadra schedule rules", () => {
     ).toBe("trabajo");
   });
 
+  it("checks both alternating work shifts without applying them to days off", () => {
+    const rotating: Availability = {
+      ...availability,
+      type: "rotativo",
+      days: ["Lun"],
+      rotatingShifts: [
+        { week: "A", days: ["Lun"], startTime: "08:00", endTime: "16:00" },
+        { week: "B", days: ["Lun"], startTime: "16:00", endTime: "22:00" },
+      ],
+    };
+
+    expect(hasWorkConflict({ startTime: "19:00", endTime: "20:00" }, rotating, preferences, "Lun")).toBe("trabajo");
+    expect(hasWorkConflict({ startTime: "19:00", endTime: "20:00" }, rotating, preferences, "Mar")).toBeNull();
+    const course: Course = {
+      id: "evening",
+      name: "Curso nocturno",
+      section: "A1",
+      days: ["Lun"],
+      startTime: "19:00",
+      endTime: "20:00",
+      credits: 3,
+      mandatory: false,
+    };
+    expect(evaluateSchedule([course], rotating, { ...preferences, courseCount: 1 }).conflicts).toEqual([
+      { courseId: "evening", day: "Lun", reason: "trabajo" },
+    ]);
+  });
+
   it("keeps only three-course combinations that include every mandatory course", () => {
     const courses: Course[] = [
-      { id: "p", name: "Programación", section: "A1", days: ["Lun"], startTime: "18:00", endTime: "20:00", credits: 3, mandatory: true },
-      { id: "b", name: "Base de Datos", section: "B2", days: ["Mar"], startTime: "19:00", endTime: "21:00", credits: 3, mandatory: true },
+      { id: "p", name: "Programación", section: "A1", days: ["Lun"], startTime: "20:00", endTime: "21:00", credits: 3, mandatory: true },
+      { id: "b", name: "Base de Datos", section: "B2", days: ["Mar"], startTime: "20:00", endTime: "21:00", credits: 3, mandatory: true },
       { id: "r", name: "Redes", section: "C1", days: ["Vie"], startTime: "19:00", endTime: "21:00", credits: 3, mandatory: false },
       { id: "m", name: "Matemática", section: "D1", days: ["Sáb"], startTime: "10:00", endTime: "12:00", credits: 3, mandatory: false },
       { id: "x", name: "Proyecto", section: "E1", days: ["Dom"], startTime: "10:00", endTime: "12:00", credits: 3, mandatory: false },
@@ -88,8 +116,8 @@ describe("Cuadra schedule rules", () => {
   it("prioritizes an option that keeps the preferred free days and avoids late classes", async () => {
     const { generateProposals } = await import("@/lib/cuadra-schedule");
     const required: Course[] = [
-      { id: "p", name: "Programación", section: "A1", days: ["Lun"], startTime: "18:00", endTime: "20:00", credits: 3, mandatory: true },
-      { id: "b", name: "Base de Datos", section: "B2", days: ["Mar"], startTime: "19:00", endTime: "21:00", credits: 3, mandatory: true },
+      { id: "p", name: "Programación", section: "A1", days: ["Lun"], startTime: "20:00", endTime: "21:00", credits: 3, mandatory: true },
+      { id: "b", name: "Base de Datos", section: "B2", days: ["Mar"], startTime: "20:00", endTime: "21:00", credits: 3, mandatory: true },
     ];
     const options: Course[] = [
       { id: "r", name: "Redes", section: "C1", days: ["Sáb"], startTime: "21:00", endTime: "22:00", credits: 3, mandatory: false },
@@ -119,7 +147,7 @@ describe("Cruces entre cursos", () => {
     expect(findCourseOverlaps([a, b, c])).toEqual([]);
   });
 
-  it("penaliza el puntaje y prefiere propuestas sin cruces entre cursos", async () => {
+  it("solo devuelve propuestas sin cruces entre cursos", async () => {
     const { generateProposals } = await import("@/lib/cuadra-schedule");
     const mk = (id: string, day: Course["days"][number], start: string, end: string, mandatory = false): Course =>
       ({ ...base, id, name: id, days: [day], startTime: start, endTime: end, mandatory });
@@ -131,7 +159,58 @@ describe("Cruces entre cursos", () => {
     const proposals = generateProposals(courses, availability, { ...preferences, courseCount: 2 });
     expect(proposals[0]?.courses.map((c) => c.id)).toEqual(["p", "libre"]);
     expect(proposals[0]?.overlaps).toHaveLength(0);
-    expect(proposals[1]?.overlaps).toHaveLength(1);
-    expect(proposals[1]!.score).toBeLessThan(proposals[0]!.score);
+    expect(proposals).toHaveLength(1);
+  });
+
+  it("devuelve las mejores opciones sin cruces entre cursos cuando todas chocan con la jornada", async () => {
+    const { generateProposals } = await import("@/lib/cuadra-schedule");
+    const required: Course = {
+      id: "required",
+      name: "Curso obligatorio",
+      section: "A1",
+      days: ["Lun"],
+      startTime: "18:00",
+      endTime: "20:00",
+      credits: 3,
+      mandatory: true,
+    };
+
+    const proposals = generateProposals([required], availability, { ...preferences, courseCount: 1 });
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]?.courses).toEqual([required]);
+    expect(proposals[0]?.conflicts).toEqual([
+      { courseId: "required", day: "Lun", reason: "traslado-descanso" },
+    ]);
+    expect(proposals[0]?.overlaps).toEqual([]);
+  });
+
+  it("uses added courses instead of demo examples and adapts to the number actually added", async () => {
+    const { generateProposals } = await import("@/lib/cuadra-schedule");
+    const demo: Course = {
+      id: "demo",
+      name: "Curso de ejemplo",
+      section: "A1",
+      days: ["Lun"],
+      startTime: "10:00",
+      endTime: "12:00",
+      credits: 3,
+      mandatory: true,
+      demo: true,
+    };
+    const added: Course = {
+      id: "added",
+      name: "Curso agregado",
+      section: "B1",
+      days: ["Sáb"],
+      startTime: "10:00",
+      endTime: "12:00",
+      credits: 3,
+      mandatory: false,
+    };
+
+    const proposals = generateProposals([demo, added], availability, preferences);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]?.courses).toEqual([added]);
   });
 });
